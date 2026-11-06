@@ -1,0 +1,10 @@
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { resolve, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const directory = resolve(process.argv[2] ?? fileURLToPath(new URL('../release/Crewroom', import.meta.url)));
+const executable = join(directory, 'Crewroom.exe'), icon = join(directory, 'resources/app/assets/icon.ico');
+if (!existsSync(executable) || !existsSync(icon)) throw new Error('请先运行 npm run app:package');
+const result = spawnSync('powershell.exe', ['-NoProfile', '-File', fileURLToPath(new URL('app-shortcut.ps1', import.meta.url)), executable, icon, directory, 'Crewroom'], { stdio: 'inherit', windowsHide: true, shell: false });
+if (result.error) throw result.error;
+process.exitCode = result.status ?? 1;
