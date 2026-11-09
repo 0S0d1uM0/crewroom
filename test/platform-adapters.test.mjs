@@ -136,6 +136,21 @@ test('platform Codex handles completion before start response and uses cumulativ
   assert.equal(start.model, 'fake'); assert.equal(start.cwd, fx.workspace);
   for (const frame of frames(fx.log).filter(f => f.envKeys)) assert.ok(frame.envKeys.every(k => !/^(ANTHROPIC_|CLAUDE)/.test(k) || k === 'CLAUDE_CONFIG_DIR'));
 });
+test('platform Codex reports the new thread when the network switch replaces a thread that never ran', async t => {
+  const fx = fixture(t, codexPeer.replace("if(f.method==='thread/start')return reply(f,{thread:{id:'thread'}});", "if(f.method==='thread/start'){globalThis.n=(globalThis.n??0)+1;return reply(f,{thread:{id:'thread-'+globalThis.n}});}"));
+  const adapter = new CodexAdapter(codexConfig, fx.workspace, () => fx.launch); fx.adapters.push(adapter);
+  let online = true; const ids = [];
+  adapter.permission = { level: () => 'safe-write', online: () => online, request: async () => ({ allowed: true }) };
+  adapter.onEvent = e => { if (e.type === 'harness-id') ids.push(e.harnessId); };
+  await adapter.start('instructions');
+  assert.equal(adapter.getSessionId(), 'thread-1');
+  online = false; await adapter.prompt('work');
+  assert.deepEqual(ids, ['thread-2']);
+  assert.equal(adapter.getSessionId(), 'thread-2');
+  assert.equal(frames(fx.log).find(f => f.method === 'turn/start').params.threadId, 'thread-2');
+  online = true; await adapter.prompt('again');
+  assert.deepEqual(ids, ['thread-2'], 'a thread that has run keeps its ID');
+});
 test('platform Codex forwards approvals and rejects unsupported requests', async t => {
   const fx = fixture(t, codexPeer), adapter = new CodexAdapter(codexConfig, fx.workspace, () => fx.launch); fx.adapters.push(adapter);
   const requested=[]; adapter.permission={level:()=> 'safe-write',online:()=>true,request:async op=>{requested.push(op);return {allowed:true,reason:'用户批准'};}};

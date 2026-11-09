@@ -6,7 +6,6 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { parseConfig, type MemberConfig, type PlatformConfig } from './config.js';
 import { ProtocolParser, mentions, type Action } from './protocol.js';
 import { SessionStorage, git, isGit, snapshot, releaseSnapshots } from './storage.js';
-import { isWaitingCommand, WAITING_DENIAL } from './permissions.js';
 import { ToolServer } from './tool-server.js';
 import { collaborationTools } from './tools.js';
 import { notesInstruction, projectContext } from './project-context.js';
@@ -14,7 +13,7 @@ import type { HarnessAdapter, PlatformEvent, ToolResult, TurnResult, Usage } fro
 
 // A member inside wait_for_messages has a waiter: its turn is open, but its output has ended.
 type WakeReason = 'user' | 'ask' | 'reply' | 'lead' | 'platform' | 'quiet' | 'checkpoint';
-interface Member { config: MemberConfig; workspace: string; adapter: HarnessAdapter; parser: ProtocolParser; state: 'idle' | 'busy' | 'paused'; queue: string[]; wakeReasons: WakeReason[]; inbox: { id: string; text: string; order: number }[]; turns: number; usage: Usage; measuredTurns: number; failed: boolean; lastText: string; outputId?: string; waiter?: (text: string) => void; boardCursor: number; spins: number; spinChecked: Set<unknown>; lastToolAt: number; steered: { at: number; text: string; reason?: WakeReason | null; source: string; order: number }[]; deliveredBoard: Set<string>; parkTimer?: NodeJS.Timeout; parked: boolean; toldLead: boolean }
+interface Member { config: MemberConfig; workspace: string; adapter: HarnessAdapter; parser: ProtocolParser; state: 'idle' | 'busy' | 'paused'; queue: string[]; wakeReasons: WakeReason[]; inbox: { id: string; text: string; order: number }[]; turns: number; usage: Usage; measuredTurns: number; failed: boolean; lastText: string; outputId?: string; waiter?: (text: string) => void; boardCursor: number; lastToolAt: number; steered: { at: number; text: string; reason?: WakeReason | null; source: string; order: number }[]; deliveredBoard: Set<string>; parkTimer?: NodeJS.Timeout; parked: boolean; toldLead: boolean }
 interface BoardEntry { id: string; author: string; text: string; at: string }
 const MAX_BOARD_READ = 100_000;
 const INBOX_RECEIPT = '已入收件箱，对方下次被唤醒时看到；需要对方立刻响应请设 reply_requested（白板用 ask）';
@@ -97,7 +96,7 @@ export class PlatformSession {
           else git(this.config.workspace, ['worktree', 'add', '-b', `agents/${this.id}/${config.name}`, workspace]);
         }
         const adapter = this.factory(config, workspace, this.dir);
-        const member: Member = { config, workspace, adapter, parser: new ProtocolParser(names), state: 'idle', queue: [], wakeReasons: [], inbox: [], turns: 0, usage: {}, measuredTurns: 0, failed: false, lastText: '', boardCursor: 0, spins: 0, spinChecked: new Set(), lastToolAt: 0, steered: [], deliveredBoard: new Set(), parked: false, toldLead: false };
+        const member: Member = { config, workspace, adapter, parser: new ProtocolParser(names), state: 'idle', queue: [], wakeReasons: [], inbox: [], turns: 0, usage: {}, measuredTurns: 0, failed: false, lastText: '', boardCursor: 0, lastToolAt: 0, steered: [], deliveredBoard: new Set(), parked: false, toldLead: false };
         this.members.set(config.name, member);
         const host = { definitions: collaborationTools(config.name, names, config.role === 'lead'), call: async (name: string, args: unknown, signal?: AbortSignal) => this.toolCall(member, name, args, signal) };
         adapter.permission = { level: () => this.permissions.level(config.name), online: () => this.config.networkAccess,
@@ -107,10 +106,9 @@ export class PlatformSession {
         adapter.onMessage = text => { if (!this.stopped) this.actions(member, member.parser.message(text)); };
         adapter.onEvent = event => {
           if ((this.stopped && event.type !== 'codex-archive') || /thought|reason/i.test(event.type)) return;
-          if (typeof event.command === 'string') this.checkSpin(member, event.id, event.command);
           if (event.type === 'tool' && !/wait_for_messages/.test(String(event.title))) member.lastToolAt = Date.now();
           if (event.type === 'tool' && !COLLABORATION_TOOL.test(String(event.title))) member.toldLead = false;
-          this.storage.event(['quota', 'tool', 'usage', 'rate-limits', 'protocol-warning', 'demo-steer', 'codex-archive', 'codex-unarchive'].includes(event.type) ? event.type : 'adapter', { member: config.name, ...event });
+          this.storage.event(['quota', 'tool', 'usage', 'rate-limits', 'protocol-warning', 'demo-steer', 'codex-archive', 'codex-unarchive', 'harness-id'].includes(event.type) ? event.type : 'adapter', { member: config.name, ...event });
         };
       }
       this.storage.seedBoard('all');
@@ -127,6 +125,9 @@ export class PlatformSession {
           await member.adapter.resume(savedId, this.instructions(member));
         } else await member.adapter.start(this.instructions(member));
         if (this.stopped) { await member.adapter.stop(); throw new Error('Session stopped during startup'); }
+        // Recovery queued work for a member that failed before the restart, and this adapter can now
+        // take it. A failed member with nothing queued stays failed, so the user can still retry it.
+        if (member.queue.length) member.failed = false;
         this.storage.event('member-start', { member: member.config.name, workspace: member.workspace, harnessId: member.adapter.getSessionId?.() });
       }
       this.ready = true; if (this.recovery && !this.paused) this.schedule();
@@ -170,15 +171,6 @@ export class PlatformSession {
   }
   // A model may answer in plain text despite its instructions, which would lose the answer.
   // Only an outstanding request it has seen is forwarded, so this cannot start a new exchange.
-  private checkSpin(member: Member, id: unknown, command: string) {
-    if (member.state !== 'busy' || member.spinChecked.has(id) || !isWaitingCommand(command)) return;
-    member.spinChecked.add(id); member.spins++;
-    this.storage.event('spin-warning', { member: member.config.name, command, count: member.spins });
-    const text = `[platform] ${WAITING_DENIAL}`;
-    if (member.spins < 3) { this.deliver(member, text, true); return; }
-    this.routing++;
-    this.track(member.adapter.interrupt().catch(() => {}).then(() => { this.enqueue(member, text); }).finally(() => { this.routing--; }));
-  }
   private forwardUnanswered(member: Member) {
     const author = member.config.name;
     if (author === this.lead || !member.lastText.trim()) return;
@@ -199,7 +191,9 @@ export class PlatformSession {
     queueMicrotask(() => { this.scheduled = false; if (!this.stopped) this.pump(); });
   }
   private enqueue(member: Member, text: string, reason: WakeReason = 'platform') {
-    if (member.failed) {
+    // During startup the loop in start() is opening this member; a second restart here would have no
+    // session ID yet, so it would replace the member's saved history with an empty new session.
+    if (member.failed && this.ready) {
       member.failed = false; member.state = 'busy'; this.routing++;
       this.track((async () => {
         try { const id = member.adapter.getSessionId?.(); await member.adapter.stop();
@@ -488,7 +482,7 @@ export class PlatformSession {
       const inbox = member.inbox.splice(0);
       const reason = member.wakeReasons[0] ?? 'platform'; member.wakeReasons = [];
       this.storage.event('wake', { member: member.config.name, reason, inboxCount: inbox.length });
-      const text = (wasParked ? '[platform] Your wait_for_messages call has ended. The platform closed that turn to save budget; nothing was lost. This arrived:\n' : '') + [...inbox.map(e => e.text), ...member.queue.splice(0)].join('\n\n'); member.state = 'busy'; member.turns++; this.totalTurns++; member.lastText = ''; member.outputId = undefined; member.spins = 0; member.spinChecked.clear(); member.steered = []; member.lastToolAt = Date.now(); member.toldLead = false;
+      const text = (wasParked ? '[platform] Your wait_for_messages call has ended. The platform closed that turn to save budget; nothing was lost. This arrived:\n' : '') + [...inbox.map(e => e.text), ...member.queue.splice(0)].join('\n\n'); member.state = 'busy'; member.turns++; this.totalTurns++; member.lastText = ''; member.outputId = undefined; member.steered = []; member.lastToolAt = Date.now(); member.toldLead = false;
       for (const p of this.pending) if (p.recipient === member.config.name) this.seenRequests.add(p.id);
       // Cleared when the lead starts, not when it ends: a worker that finishes during the lead's
       // turn without mentioning it must still trigger the idle notice.

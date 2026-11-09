@@ -16,7 +16,7 @@ export function judgeOperation(level: PermissionLevel, online: boolean, op: Oper
   if (/^(?:mcp__agents__|post_board|message_teammate|read_board|wait_for_messages|interrupt_teammate|set_member_permission|web_search|web_fetch|WebSearch|WebFetch)/i.test(op.name ?? '')) return 'allow';
   if (op.forceApproval) return 'ask';
   if (op.command) {
-    if (/\b(?:collab|sleep|start-sleep)\b/i.test(op.command)) return 'deny';
+    if (/\bcollab\b/i.test(op.command)) return 'deny';
     const read = /^\s*(?:Get-Content|Get-ChildItem|Get-Item|Test-Path|Select-String|cat|ls|pwd|rg|type|git\s+(?:status|diff|log|show|ls-files|rev-parse))\b/i.test(op.command) && !/[>|;&$()`]|\b(?:--output|--exec|--pre)\b/i.test(op.command);
     if (level === 'read-only') return read ? 'allow' : 'ask';
     if (/\bgit\b[^\n;|&]*\b(?:push|reset\s+--hard|gc|clean|rebase|filter-branch)\b|(?:^|\s)(?:--force|--hard|-f)(?=\s|$)|\b(?:Remove-Item|rmdir|del|rm)\b[^\n]*(?:-r|-f|\/s|\*)|\b(?:Start-Process|start|Stop-Process|taskkill|kill|explorer|open|xdg-open)\b/i.test(op.command)) return 'ask';

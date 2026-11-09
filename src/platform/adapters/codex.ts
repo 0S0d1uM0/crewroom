@@ -116,7 +116,11 @@ export class CodexAdapter implements HarnessAdapter {
     if (online === this.appliedOnline) return;
     const config = this.webConfig(online);
     if (this.hasRollout) await this.rpc!.request('thread/resume', { threadId: this.threadId, config });
-    else this.threadId = (await this.rpc!.request('thread/start', { ...this.threadParams, config })).thread.id;
+    else {
+      this.threadId = (await this.rpc!.request('thread/start', { ...this.threadParams, config })).thread.id;
+      // Only this thread will ever have a rollout, so a later restart must resume this one.
+      this.onEvent({ type: 'harness-id', harnessId: this.threadId });
+    }
     this.appliedOnline = online;
   }
   private sandboxPolicy() {

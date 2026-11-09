@@ -7,7 +7,8 @@ import { PlatformSession } from '../dist/platform/session.js';
 import { ToolServer } from '../dist/platform/tool-server.js';
 import { collaborationTools } from '../dist/platform/tools.js';
 import { projectContext, notesInstruction } from '../dist/platform/project-context.js';
-import { isWaitingCommand, toolDenial, WAITING_DENIAL } from '../dist/platform/permissions.js';
+import { toolDenial } from '../dist/platform/permissions.js';
+import { judgeOperation } from '../dist/platform/permission-manager.js';
 
 const tick = async (n = 5) => { for (let i = 0; i < n; i++) await new Promise(resolve => setImmediate(resolve)); };
 const completed = { status: 'completed', usage: { totalTokens: 5 } };
@@ -280,47 +281,17 @@ test('receipts mention messages waiting without delivering them', async t => {
   assert.equal(session.members.get('qwen').queue.length, 1);
 });
 
-test('spinning: a sleep command is called out, and the third one interrupts the turn', async t => {
-  const { session, adapters, events } = await team(t, { qwen: never });
-  session.sendUser('go'); await tick();
-  await adapters.lead.call('post_board', { text: 'x', ask: ['qwen'] }); await tick();
-  const q = adapters.qwen;
-  q.onEvent({ type: 'tool', id: 'c1', command: 'npm test' }); await tick();
-  assert.deepEqual(q.steers, []);
-  q.onEvent({ type: 'tool', id: 'c2', command: 'Start-Sleep -Seconds 30' }); q.onEvent({ type: 'tool', id: 'c2', command: 'Start-Sleep -Seconds 30' }); await tick();
-  assert.equal(q.steers.length, 1, 'the same call counts once'); assert.ok(q.steers[0].includes('wait_for_messages'));
-  q.onEvent({ type: 'tool', id: 'c3', command: 'sleep 30' }); await tick();
-  q.onEvent({ type: 'tool', id: 'c4', command: 'sleep 30' }); await tick();
-  assert.equal(q.interrupts, 1);
-  assert.equal(events.filter(e => e.type === 'spin-warning').length, 3);
-  assert.ok(session.members.get('qwen').queue.join('').includes('wait_for_messages'));
-});
-
-test('isWaitingCommand: a loop waiting for what the same command started is work, any other loop is not', () => {
-  // The shape of a real test run: an unrelated foreach first, then the server, then a wait for its log.
-  const real = `foreach ($f in @($raw,$err)) { Remove-Item $f }; $p = Start-Process -FilePath 'mod\\gradlew.bat' -PassThru; $deadline=(Get-Date).AddSeconds(300); while ((Get-Date) -lt $deadline) { Start-Sleep -Seconds 8; if (Select-String $raw 'Done') { break } }`;
-  for (const c of [real, 'Start-Job { npm start }; while (!(Test-Path x)) { Start-Sleep 2 }', 'node server.js & while ! curl -s localhost; do sleep 1; done', 'node server.js &\nuntil curl -s localhost; do sleep 1; done']) {
-    assert.ok(!isWaitingCommand(c), c);
-    assert.equal(toolDenial('pwsh', { command: c }, process.cwd(), process.cwd()), undefined, c);
-  }
-  for (const c of [
-    'while (!(Test-Path done.txt)) { Start-Sleep 5 }',
-    '& gradlew.bat build; while (!(Test-Path done.txt)) { Start-Sleep 5 }',
-    'npm test && while true; do sleep 5; done',
-    'while true; do sleep 5; done; Start-Process notepad',
-    'Start-Sleep 75; Start-Process notepad',
-  ]) assert.ok(isWaitingCommand(c), c);
-});
-
-test('isWaitingCommand: catches sleeping and polling loops, not ordinary work', () => {
-  for (const c of ['sleep 30', 'Start-Sleep -Seconds 30', 'start-sleep 5; Get-Content x', 'timeout /t 30', 'timeout.exe 5', 'while true; do cat x; sleep 5; done', 'foreach ($i in 1..9) { Start-Sleep 5 }', 'for i in 1 2 3; do sleep 1; done']) assert.ok(isWaitingCommand(c), c);
-  for (const c of ['npm test', 'git status', 'node server.js & sleep 2; curl localhost', 'grep sleep src/a.ts', 'echo while we work', 'npm run sleepy']) assert.ok(!isWaitingCommand(c), c);
-});
-
-test('toolDenial: a DSH sleep is refused before it runs', () => {
-  assert.equal(toolDenial('pwsh', { command: 'Start-Sleep 30' }, process.cwd(), process.cwd()), WAITING_DENIAL);
-  assert.equal(toolDenial('tool:bash', { command: 'sleep 30' }, process.cwd(), process.cwd()), WAITING_DENIAL);
-  assert.equal(toolDenial('pwsh', { command: 'npm test' }, process.cwd(), process.cwd()), undefined);
+test('waiting: sleeps and polling loops are not detected, blocked or interrupted at run time', async t => {
+  const { session, adapters, events } = await team(t, { qwen: async q => {
+    for (const command of ['sleep 30', 'Start-Sleep 5', 'timeout /t 30', 'for i in $(seq 1 60); do unity command lighting bake_status; sleep 10; done']) q.onEvent({ type: 'tool', id: command, command });
+    await tick(); return completed;
+  } });
+  await adapters.lead.call('message_teammate', { to: 'qwen', text: 'work' }); await session.waitForSettled();
+  assert.equal(adapters.qwen.interrupts, 0);
+  assert.equal(adapters.qwen.steers.length, 0);
+  assert.ok(!events.some(e => e.type === 'spin-warning'));
+  for (const command of ['Start-Sleep 30', 'sleep 30']) assert.equal(toolDenial('pwsh', { command }, process.cwd(), process.cwd()), undefined, command);
+  assert.equal(judgeOperation('safe-write', true, { command: 'sleep 10; Get-Content log.txt', cwd: process.cwd() }) === 'deny', false);
 });
 
 test('turn timeout: time blocked in a wait does not count', async t => {
@@ -648,6 +619,19 @@ test('checkpoint: the count survives a restart, and a failed lead gets it once i
   await pairTalk(second.adapters, 14, 1); await tick();
   assert.equal(second.adapters.lead.prompts.length, 1);
   assert.match(second.adapters.lead.prompts[0], /exchanged 15 messages/); assert.match(second.adapters.lead.prompts[0], /talk-14/); assert.doesNotMatch(second.adapters.lead.prompts[0], /talk-2\b/);
+});
+
+test('recovery: a member that failed before the restart keeps its saved session and gets what was queued', async t => {
+  const first = await team(t); const at = new Date().toISOString(); await first.session.stop();
+  const history = [
+    { type: 'turn-start', member: 'lead', at }, { type: 'turn-end', member: 'lead', status: 'failed', at },
+    { type: 'member-failed', member: 'lead', error: 'ENOTFOUND', at }, { type: 'turn-start', member: 'sol', at },
+  ];
+  const { adapters, events } = await team(t, {}, { recovery: { id: first.session.id, events: history, harnessIds: { lead: 'saved-lead', sol: 'saved-sol' } } });
+  await tick();
+  assert.equal(adapters.lead.resumed, 'saved-lead', 'a second restart must not replace the saved session');
+  assert.equal(events.filter(e => e.type === 'member-start' && e.member === 'lead').length, 1);
+  assert.match(adapters.lead.prompts.join('\n'), /sol was interrupted by a restart/);
 });
 
 test('wake rules: a permission request does not wake the lead, and reaches it with the next wake', async t => {

@@ -1,7 +1,7 @@
 import { AcpWorker, type Launch } from '../../acp.js';
 import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk';
 import { scrubbedEnv } from '../env.js';
-import { containedFile, isWaitingCommand, shellAllowed } from '../permissions.js';
+import { containedFile, shellAllowed } from '../permissions.js';
 import { shellDenial } from '../../shell-policy.js';
 import { spawn } from 'node:child_process';
 import type { AdapterEvent, HarnessAdapter, ToolHost, TurnResult } from '../types.js';
@@ -82,7 +82,7 @@ export abstract class AcpAdapter implements HarnessAdapter {
     let allowed = false;
     if (/^(WebFetch|WebSearch)$/.test(name) || name.startsWith('mcp__agents__')) allowed = true;
     else if (typeof input.command === 'string') {
-      allowed = shellAllowed(input.command, this.workspace, this.sessionDir) && !isWaitingCommand(input.command);
+      allowed = shellAllowed(input.command, this.workspace, this.sessionDir);
       if (this.dsh) allowed &&= !shellDenial(this.workspace, { mode: 'workspace-write' }, name, input);
       if (input.workdir) allowed &&= containedFile(input.workdir, this.workspace);
     } else {

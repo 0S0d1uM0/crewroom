@@ -78,7 +78,7 @@ export async function startApp(options: { home?: string; factory?: AdapterFactor
     const list = histories.get(id) ?? []; histories.set(id, list); list.push({ ...e, sequence: list.length + 1 }); observe(id, e);
     e = list.at(-1);
     const meta = records.get(id);
-    if (e.type === 'member-start' && e.harnessId && meta) { meta.harnessIds[e.member] = e.harnessId; atomic(join(home, 'sessions', id, 'session.json'), meta); }
+    if ((e.type === 'member-start' || e.type === 'harness-id') && e.harnessId && meta) { meta.harnessIds[e.member] = e.harnessId; atomic(join(home, 'sessions', id, 'session.json'), meta); }
     if (e.type === 'rate-limits' && meta) {
       const harness = meta.config.members.find((m: any) => m.name === e.member)?.harness;
       if (harness && harness !== 'dsh') {
