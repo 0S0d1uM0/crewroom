@@ -86,6 +86,7 @@ export async function startApp(options: { home?: string; factory?: AdapterFactor
         for(const [sid,s] of live) {
           s.knownQuota.set(harness,q);
           if(status(sid)==='已停止' || !s.config.members.some(m=>m.harness===harness)) continue;
+          s.quotaChanged(harness);
           const lead=[...s.members.values()].find(m=>m.config.role==='lead')!;
           for(const notice of quotaNotices(harness,e,history(sid)).events) {
             s.storage.event(notice.type,{...notice,user:lead.config.harness===harness});

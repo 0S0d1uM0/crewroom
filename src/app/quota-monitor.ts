@@ -5,7 +5,8 @@ export class QuotaMonitor {
   async poll(sessions: Iterable<any>) {
     if (this.reading) return;
     const candidates = [...sessions].filter(s=>!s.paused).flatMap(s=>[...s.members.values()].map((m:any)=>({s,m})));
-    const usable = candidates.filter(({m})=>m.config.harness==='codex' && m.state!=='paused' && !m.failed && m.adapter.readQuota);
+    // A member paused for quota is polled too: a new reading is what lets it resume.
+    const usable = candidates.filter(({m})=>m.config.harness==='codex' && !m.failed && m.adapter.readQuota);
     this.reading=true;
     try {
       // The first member whose harness is running answers for the whole harness; one not started yet has nothing to ask.

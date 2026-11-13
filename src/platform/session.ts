@@ -27,9 +27,27 @@ const COLLABORATION_TOOL = /post_board|message_teammate|read_board|wait_for_mess
 export interface PendingReply { id: string; requester: string; recipient: string }
 export type AdapterFactory = (member: MemberConfig, workspace: string, sessionDir: string) => HarnessAdapter;
 
+// A normalized quota reading says no more turns can run before a window resets.
+export function quotaExhausted(known: any): boolean {
+  const pending = (w: any) => !w.resetsAt || Date.parse(w.resetsAt) > Date.now();
+  return Boolean((known?.ordinaryUsageAllowed === false && (!known.windows?.length || known.windows.some(pending)))
+    || known?.windows?.some((w: any) => (w.usedPercent >= 100 || w.status === 'rejected') && pending(w)));
+}
+
+
 export class PlatformSession {
   readonly permissions: PermissionManager;
   knownQuota = new Map<string, any>();
+  // Called after a new reading. Members paused for quota on that harness go back to work once the
+  // reading allows it; nothing else would wake them, since quota polling never reaches them otherwise.
+  quotaChanged(harness: string) {
+    if (this.stopped || quotaExhausted(this.knownQuota.get(harness))) return;
+    for (const m of this.members.values()) {
+      if (m.config.harness !== harness || m.state !== 'paused') continue;
+      m.state = 'idle'; this.storage.event('quota-resumed', { member: m.config.name });
+    }
+    this.schedule();
+  }
   notifyLead(text: string) {
     const lead = this.members.get(this.lead)!;
     if (this.stopped || lead.state === 'paused' || this.knownQuota.get(lead.config.harness)?.exhausted) return;
@@ -521,8 +539,16 @@ export class PlatformSession {
   private async run(member: Member, text: string) {
     let result: TurnResult, timer: NodeJS.Timeout | undefined;
     try {
+      let exhausted = quotaExhausted(this.knownQuota.get(member.config.harness));
+      // The saved reading can be stale: the user may have reset the limit or changed plan since.
+      // Ask the harness again before turning the member away; the reading updates knownQuota.
+      if (exhausted && member.adapter.readQuota) {
+        try {
+          const data = await member.adapter.readQuota();
+          if (data) { this.storage.event('rate-limits', { member: member.config.name, ...data }); exhausted = quotaExhausted(this.knownQuota.get(member.config.harness)); }
+        } catch (error) { this.storage.event('protocol-warning', { text: '额度查询失败，按上次读数处理：' + String(error) }); }
+      }
       const known = this.knownQuota.get(member.config.harness);
-      const exhausted = (known?.ordinaryUsageAllowed === false && (!known.windows?.length || known.windows.some((w:any)=>!w.resetsAt || Date.parse(w.resetsAt)>Date.now()))) || known?.windows?.some((w: any) => (w.usedPercent >= 100 || w.status === 'rejected') && (!w.resetsAt || Date.parse(w.resetsAt) > Date.now()));
       const prompt = exhausted ? Promise.resolve<TurnResult>({status:'quota',quota:known}) : member.adapter.prompt(text);
       // Time spent blocked in wait_for_messages is not work, so it does not count against the limit.
       result = this.config.turnTimeoutMs === undefined ? await prompt : await Promise.race([prompt, new Promise<never>((_, reject) => {

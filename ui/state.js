@@ -44,7 +44,7 @@ function apply(state, event) {
     case 'from-user': s.answeredAt = s.activities.length; s.messages.push({ role: 'user', text: e.text, at: e.at }); break;
     case 'to-user': s.messages.push({ role: 'lead', text: e.text, at: e.at }); break;
     case 'session-start': s.status = '空闲'; break;
-    case 'member-start': if (m) { m.state = '空闲'; m.error = ''; } break;
+    case 'member-start': case 'quota-resumed': if (m) { m.state = '空闲'; m.error = ''; } break;
     case 'turn-start': if (m) { m.state = '工作中'; m.turns++; m.action = ''; m.error = ''; m.turnUsage = null; if(m.role==='lead')s.leadTurnAt=s.activities.length; } s.status = '运行中'; break;
     case 'wait-start': if (m) { m.state = '等待消息'; m.action = ''; } break;
     case 'wait-resume': if (m) { m.state = '工作中'; m.turns++; m.action = ''; m.error = ''; m.turnUsage = null; if(m.role==='lead')s.leadTurnAt=s.activities.length; } s.status = '运行中'; break;

@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { QuotaMonitor, quotaNotices, QUOTA_POLL_MS } from '../dist/app/quota-monitor.js';
 import { serviceEnded, closeAction } from '../dist/app/shell.js';
 const data=(used=90,reset=Date.now()+86400000)=>({rateLimits:{primary:{usedPercent:used,windowDurationMins:300,resetsAt:Math.floor(reset/1000)}}});
-test('service quota polling uses one connection across members and sessions, skips paused and non-Codex',async()=>{
+test('service quota polling uses one connection across members and sessions, skips paused sessions and non-Codex',async()=>{
  let calls=0,finish;const logs=[];
  const member=(h='codex',state='idle')=>({config:{harness:h,name:'a'},state,adapter:{readQuota:()=>{calls++;return new Promise(r=>finish=r);}}});
  const session=(members,paused=false)=>({members:new Map(members.map((m,i)=>[i,m])),paused,storage:{event:(...e)=>logs.push(e)}});
  const monitor=new QuotaMonitor(),sessions=[session([member(),member()]),session([member()])];
  const pending=monitor.poll(sessions);await monitor.poll(sessions);assert.equal(calls,1);finish(data());await pending;assert.equal(logs[0][0],'rate-limits');
- await monitor.poll([session([member()],true),session([member('claude'),member('dsh'),member('codex','paused')])]);assert.equal(calls,1);assert.equal(QUOTA_POLL_MS,300000);
+ await monitor.poll([session([member()],true),session([member('claude'),member('dsh')])]);assert.equal(calls,1);
+ const paused=monitor.poll([session([member('codex','paused')])]);assert.equal(calls,2,'a member paused for quota is polled, since a new reading is what lets it resume');finish(data());await paused;assert.equal(QUOTA_POLL_MS,300000);
 });
 test('read failure emits only warning and leaves members available',async()=>{
  const logs=[],m={config:{harness:'codex'},state:'busy',failed:false,adapter:{readQuota:async()=>{throw Error('timeout');}}};
